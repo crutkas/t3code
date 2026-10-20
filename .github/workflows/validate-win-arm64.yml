@@ -1,0 +1,102 @@
+name: Validate Windows arm64 desktop build
+
+on:
+  push:
+    branches: ["validate/**"]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  VERSION: 0.1.1-nightly.20261020.3411
+
+jobs:
+  stage:
+    name: Stage release inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download inputs from the bench-inputs release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download bench-inputs -R "$GITHUB_REPOSITORY" -D inputs
+          mkdir -p staged/js-bundle staged/verify
+          unzip -q inputs/js-bundle.zip -d staged/js-bundle
+          unzip -q inputs/release-dependency-verification.zip -d staged/verify
+          find staged -maxdepth 3 | head -20
+      - uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: staged/js-bundle/
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-dependency-verification
+          path: staged/verify/
+          if-no-files-found: error
+          retention-days: 1
+
+  # release-desktop.yml's Windows job waits for a job ending in this name and
+  # its cli-linux-arm64 artifact.
+  linux_cli:
+    name: Build Linux arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux arm64 CLI archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download bench-inputs -R "$GITHUB_REPOSITORY" -p "t3-*-linux-arm64.tar.gz" -D cli
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-linux-arm64
+          path: cli/
+          if-no-files-found: error
+          retention-days: 1
+
+  win_patched:
+    name: Patched
+    needs: [stage]
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: 0.1.1-nightly.20261020.3411
+      ref: ${{ github.sha }}
+      release_channel: nightly
+      relay_client_tracing: false
+      clerk_publishable_key: ""
+      clerk_jwt_template: t3-relay
+      clerk_cli_oauth_client_id: ""
+      relay_url: https://relay.t3.codes
+      label: Windows arm64
+      runner: windows-11-arm
+      platform: win
+      target: nsis
+      arch: arm64
+      rust_target: aarch64-pc-windows-msvc
+      resource_key: win32-arm64
+      cli_archive: true
+
+  win_baseline:
+    name: Baseline
+    needs: [stage]
+    uses: ./.github/workflows/release-desktop-baseline.yml
+    with:
+      version: 0.1.1-nightly.20261020.3411
+      ref: ${{ github.sha }}
+      release_channel: nightly
+      relay_client_tracing: false
+      clerk_publishable_key: ""
+      clerk_jwt_template: t3-relay
+      clerk_cli_oauth_client_id: ""
+      relay_url: https://relay.t3.codes
+      label: Windows arm64 baseline
+      runner: windows-11-arm
+      platform: win
+      target: nsis
+      arch: arm64
+      rust_target: aarch64-pc-windows-msvc
+      resource_key: win32-arm64
+      cli_archive: true
