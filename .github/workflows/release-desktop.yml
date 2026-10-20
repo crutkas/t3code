@@ -140,6 +140,9 @@ jobs:
             Format-Volume -FileSystem NTFS -NewFileSystemLabel Work -Confirm:$false -Force |
             Out-Null
           New-Item -ItemType Directory -Force -Path D:\workspace, D:\tmp, D:\pnpm-store | Out-Null
+          # This shell starts inside the empty workspace, which blocks removing it.
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          [Environment]::CurrentDirectory = $env:RUNNER_TEMP
           Remove-Item -LiteralPath $env:GITHUB_WORKSPACE -Recurse -Force
           New-Item -ItemType Junction -Path $env:GITHUB_WORKSPACE -Target D:\workspace | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Encoding ascii -Value "TEMP=D:\tmp", "TMP=D:\tmp", "pnpm_config_store_dir=D:\pnpm-store"
