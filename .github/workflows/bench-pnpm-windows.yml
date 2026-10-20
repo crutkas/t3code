@@ -54,18 +54,19 @@ jobs:
           if ($disk.IsReadOnly) { $disk | Set-Disk -IsReadOnly $false }
           if ($disk.PartitionStyle -ne 'RAW') { $disk | Clear-Disk -RemoveData -RemoveOEM -Confirm:$false }
           $disk = Get-Disk -Number $disk.Number
-          $disk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -DriveLetter N -UseMaximumSize | Out-Null
+          $disk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -DriveLetter D -UseMaximumSize | Out-Null
           if ('${{ matrix.drive }}' -eq 'nvme-devdrive') {
-            Format-Volume -DriveLetter N -DevDrive -FileSystem ReFS -NewFileSystemLabel DevDrive -Confirm:$false -Force | Out-Host
-            fsutil devdrv query N:
+            Format-Volume -DriveLetter D -DevDrive -FileSystem ReFS -NewFileSystemLabel DevDrive -Confirm:$false -Force | Out-Host
+            fsutil devdrv query D:
           } else {
-            Format-Volume -DriveLetter N -FileSystem NTFS -NewFileSystemLabel NVMe -Confirm:$false -Force | Out-Host
+            Format-Volume -DriveLetter D -FileSystem NTFS -NewFileSystemLabel NVMe -Confirm:$false -Force | Out-Host
           }
-          New-Item -ItemType Directory -Force N:\w, N:\tmp, N:\pnpm-store | Out-Null
-          "WORKDIR=N:\w" >> $env:GITHUB_ENV
-          "TEMP=N:\tmp" >> $env:GITHUB_ENV
-          "TMP=N:\tmp" >> $env:GITHUB_ENV
-          "pnpm_config_store_dir=N:\pnpm-store" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force D:\w, D:\tmp, D:\pnpm-store | Out-Null
+          "WORKDIR=D:\w" >> $env:GITHUB_ENV
+          "TEMP=D:\tmp" >> $env:GITHUB_ENV
+          "TMP=D:\tmp" >> $env:GITHUB_ENV
+          "pnpm_config_store_dir=D:\pnpm-store" >> $env:GITHUB_ENV
+          (Get-MpPreference).ExclusionPath -join ";" | ForEach-Object { "Defender exclusions: $_" }
           "NVMe ready in $([int]$sw.Elapsed.TotalSeconds)s"
       - name: Use default workspace
         if: matrix.drive == 'default'
