@@ -1,0 +1,146 @@
+name: Bench pnpm install (Windows)
+
+on:
+  push:
+    branches: ["bench/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.runner }} / ${{ matrix.drive }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-11-arm, windows-2025]
+        drive: [default, devdrive]
+    steps:
+      - name: Runner diagnostics
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          "CPU: $($cpu.Name) | logical=$env:NUMBER_OF_PROCESSORS | arch=$env:PROCESSOR_ARCHITECTURE"
+          "RAM GB: $([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB))"
+          "OS: $((Get-CimInstance Win32_OperatingSystem).Caption) $((Get-CimInstance Win32_OperatingSystem).Version)"
+          "GITHUB_WORKSPACE=$env:GITHUB_WORKSPACE  TEMP=$env:TEMP  LOCALAPPDATA=$env:LOCALAPPDATA"
+          "--- Defender status"
+          Get-MpComputerStatus | Select-Object AMRunningMode, AntivirusEnabled, RealTimeProtectionEnabled, OnAccessProtectionEnabled, BehaviorMonitorEnabled, IOAVProtectionEnabled, IsTamperProtected | Format-List | Out-String
+          "--- Defender preferences"
+          Get-MpPreference | Select-Object DisableRealtimeMonitoring, DisableBehaviorMonitoring, DisableIOAVProtection, @{n='ExclusionPath';e={$_.ExclusionPath -join ';'}}, @{n='ExclusionProcess';e={$_.ExclusionProcess -join ';'}} | Format-List | Out-String
+          "--- Physical disks"
+          Get-PhysicalDisk | Select-Object FriendlyName, MediaType, BusType, @{n='SizeGB';e={[math]::Round($_.Size / 1GB)}} | Format-Table -AutoSize | Out-String
+          "--- Volumes"
+          Get-Volume | Where-Object DriveLetter | Select-Object DriveLetter, FileSystem, FileSystemLabel, @{n='SizeGB';e={[math]::Round($_.Size / 1GB)}}, @{n='FreeGB';e={[math]::Round($_.SizeRemaining / 1GB)}} | Format-Table -AutoSize | Out-String
+          "--- Filter drivers"
+          fltmc filters
+
+      - name: Create Dev Drive
+        if: matrix.drive == 'devdrive'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $vhd = "C:\devdrive.vhdx"
+          @"
+          create vdisk file="$vhd" maximum=40960 type=expandable
+          select vdisk file="$vhd"
+          attach vdisk
+          "@ | Set-Content -Path "$env:RUNNER_TEMP\devdrive.txt" -Encoding ascii
+          diskpart /s "$env:RUNNER_TEMP\devdrive.txt"
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed: $LASTEXITCODE" }
+          $disk = Get-DiskImage -ImagePath $vhd | Get-Disk
+          $disk | Initialize-Disk -PartitionStyle GPT -PassThru |
+            New-Partition -DriveLetter E -UseMaximumSize |
+            Format-Volume -DevDrive -FileSystem ReFS -NewFileSystemLabel DevDrive -Confirm:$false -Force | Out-Host
+          fsutil devdrv query E:
+          New-Item -ItemType Directory -Force E:\w, E:\tmp, E:\pnpm-store | Out-Null
+          "WORKDIR=E:\w" >> $env:GITHUB_ENV
+          "TEMP=E:\tmp" >> $env:GITHUB_ENV
+          "TMP=E:\tmp" >> $env:GITHUB_ENV
+          "pnpm_config_store_dir=E:\pnpm-store" >> $env:GITHUB_ENV
+          "Dev Drive ready in $([int]$sw.Elapsed.TotalSeconds)s"
+
+      - name: Use default workspace
+        if: matrix.drive == 'default'
+        shell: pwsh
+        run: '"WORKDIR=$env:GITHUB_WORKSPACE" >> $env:GITHUB_ENV'
+
+      - name: Checkout (timed)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git config --global --add safe.directory '*'
+          New-Item -ItemType Directory -Force $env:WORKDIR | Out-Null
+          Set-Location $env:WORKDIR
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          git init -q .
+          git remote add origin "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git"
+          git fetch -q --no-tags --depth=1 origin $env:GITHUB_SHA
+          $fetch = $sw.Elapsed.TotalSeconds
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout -q --detach FETCH_HEAD
+          $total = $sw.Elapsed.TotalSeconds
+          "CHECKOUT_FETCH_S=$([math]::Round($fetch,1))" >> $env:GITHUB_ENV
+          "CHECKOUT_WRITE_S=$([math]::Round($total - $fetch,1))" >> $env:GITHUB_ENV
+          "fetch=$([math]::Round($fetch,1))s write=$([math]::Round($total - $fetch,1))s"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: ${{ env.WORKDIR }}\package.json
+          cache: false
+          run-install: false
+
+      - name: Cold install (timed)
+        shell: pwsh
+        run: |
+          Set-Location $env:WORKDIR
+          node -p "'node ' + process.version + ' ' + process.arch"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+          $code = $LASTEXITCODE
+          $t = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+          "COLD_INSTALL_S=$t" >> $env:GITHUB_ENV
+          "cold install: ${t}s (exit $code)"
+          vp exec pnpm store path 2>$null
+          if ($code -ne 0) { exit $code }
+
+      - name: Remove node_modules (timed)
+        shell: pwsh
+        run: |
+          Set-Location $env:WORKDIR
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          Get-ChildItem -Directory -Recurse -Depth 2 -Filter node_modules -ErrorAction SilentlyContinue |
+            Sort-Object { $_.FullName.Length } -Descending |
+            ForEach-Object { cmd /c rmdir /s /q "$($_.FullName)" }
+          $t = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+          "RM_S=$t" >> $env:GITHUB_ENV
+          "rm node_modules: ${t}s"
+
+      - name: Offline link-only install (timed)
+        shell: pwsh
+        run: |
+          Set-Location $env:WORKDIR
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          vp install --offline --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+          $code = $LASTEXITCODE
+          $t = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+          "LINK_INSTALL_S=$t" >> $env:GITHUB_ENV
+          "offline link-only install: ${t}s (exit $code)"
+          if ($code -ne 0) { exit $code }
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $row = "| ${{ matrix.runner }} | ${{ matrix.drive }} | $env:CHECKOUT_FETCH_S | $env:CHECKOUT_WRITE_S | $env:COLD_INSTALL_S | $env:RM_S | $env:LINK_INSTALL_S |"
+          "BENCH_RESULT $row"
+          @(
+            "| runner | drive | fetch s | checkout write s | cold install s | rm node_modules s | offline link s |",
+            "|---|---|---|---|---|---|---|",
+            $row
+          ) -join "`n" >> $env:GITHUB_STEP_SUMMARY
